@@ -202,6 +202,8 @@ class IndexedDBExternalObject:
         else:
             raise NotImplementedError()
 
+    def get_path(self) -> os.PathLike:
+        return pathlib.Path(f"{self.blob_number >> 8:02x}", f"{self.blob_number:x}")
 
 @dataclasses.dataclass(frozen=True)
 class DatabaseId:
@@ -577,11 +579,15 @@ class IndexedDb:
                 info = None
 
             if info is not None:
-                data_path = pathlib.Path(str(db_id), f"{info.blob_number >> 8:02x}", f"{info.blob_number:x}")
+                try:
+                    blob = self.get_blob_from_info(db_id, info).read()
+                except FileNotFoundError:
+                    return None
+
+                blob_path = self.get_blob_path(db_id, info)
                 return self.read_record_precursor(
-                    key, db_id, store_id,
-                    self.get_blob(db_id, store_id, key.raw_key, externally_serialized_blob_index).read(),
-                    bad_deserializer_data_handler, str(data_path))
+                    key, db_id, store_id, blob,
+                    bad_deserializer_data_handler, str(blob_path))
             else:
                 return None
         else:
@@ -666,14 +672,20 @@ class IndexedDb:
             raise ValueError("Can't resolve blob if blob dir is not set")
         info = self.get_blob_info(db_id, store_id, raw_key, file_index)
 
+        return self.get_blob_from_info(db_id, info)
+
+    def get_blob_from_info(self, db_id: int, info: IndexedDBExternalObject) -> os.PathLike:
         # path will be: origin.blob/database id/top 16 bits of blob number with two digits/blob number
         # TODO: check if this is still the case on non-windows systems
-        path = pathlib.Path(self._blob_dir, f"{db_id:x}", f"{info.blob_number >> 8:02x}", f"{info.blob_number:x}")
+        path = self.get_blob_path(db_id, info)
 
         if path.exists():
             return path.open("rb")
 
         raise FileNotFoundError(path)
+
+    def get_blob_path(self, db_id: int, info: IndexedDBExternalObject) -> os.PathLike:
+        return pathlib.Path(self._blob_dir, f"{db_id:x}", info.get_path())
 
     def get_undo_task_scopes(self):
         # https://github.com/chromium/chromium/blob/master/components/services/storage/indexed_db/scopes/leveldb_scopes_coding.cc
@@ -944,6 +956,7 @@ class WrappedIndexDB:
     is simpler and more pythonic.
     """
     def __init__(self, leveldb_dir: os.PathLike, leveldb_blob_dir: os.PathLike = None):
+        leveldb_blob_dir = leveldb_blob_dir or leveldb_dir.with_suffix(".blob")
         self._raw_db = IndexedDb(leveldb_dir, leveldb_blob_dir)
         self._multiple_origins = len(set(x.origin for x in self._raw_db.global_metadata.db_ids)) > 1
 
